@@ -421,13 +421,30 @@ const P = {
     });
   },
   q: async (s) => {
-    const r = await fetch(s.u, { headers: H, signal: AbortSignal.timeout(60000) });
-    if (!r.ok) throw new Error(`http ${r.status}`);
-    const [h, ...rows] = new TextDecoder("latin1")
-      .decode(await r.arrayBuffer())
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((l) => l.split(",").map((c) => c.replace(/"/g, "").trim()));
+    const load = async (u) => {
+      if (/datastore_search/.test(u)) {
+        const j = (await json(u)).result;
+        const f = j.fields.map((x) => x.id);
+        return [f, ...j.records.map((r) => f.map((k) => String(r[k] ?? "").trim()))];
+      }
+      const r = await fetch(u, { headers: H, signal: AbortSignal.timeout(60000) });
+      if (!r.ok) throw new Error(`http ${r.status}`);
+      return new TextDecoder("latin1")
+        .decode(await r.arrayBuffer())
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((l) => l.split(",").map((c) => c.replace(/"/g, "").trim()));
+    };
+    let h, rows, e;
+    for (const u of [s.u].flat()) {
+      try {
+        [h, ...rows] = await load(u);
+        break;
+      } catch (x) {
+        e = x;
+      }
+    }
+    if (!h) throw e;
     const ix = (re) => h.findIndex((c) => re.test(c));
     const c = {
       p: ix(/^No_permis/),
