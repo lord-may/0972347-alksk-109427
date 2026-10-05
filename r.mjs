@@ -54,35 +54,35 @@ async function get(u, o = {}) {
 }
 const json = async (u, o) => JSON.parse((await get(u, o)).t);
 
-// Toronto wall-clock time -> UTC ms
-const TZ = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "America/Toronto",
-  hourCycle: "h23",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-});
-const parts = (ms) =>
-  Object.fromEntries(TZ.formatToParts(ms).map((x) => [x.type, +x.value]));
-const off = (ms) => {
-  const p = parts(ms);
+const TZ = {};
+const fmt = (z = "America/Toronto") =>
+  (TZ[z] ??= new Intl.DateTimeFormat("en-CA", {
+    timeZone: z,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }));
+const parts = (ms, z) =>
+  Object.fromEntries(fmt(z).formatToParts(ms).map((x) => [x.type, +x.value]));
+const off = (ms, z) => {
+  const p = parts(ms, z);
   return (
     Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) -
     Math.floor(ms / 1000) * 1000
   );
 };
-const local = (y, mo, d, h, mi, s) => {
+const local = (z, y, mo, d, h, mi, s) => {
   const g = Date.UTC(y, mo, d, h, mi, s);
-  return g - off(g - off(g));
+  return g - off(g - off(g, z), z);
 };
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 const MON = "jan feb mar apr may jun jul aug sep oct nov dec".split(" ");
 
-// loose as-of parser: ISO with zone, or Toronto-local text in many shapes
-function when(v) {
+function when(v, z) {
   if (typeof v === "number") v = new Date(v < 1e11 ? v * 1000 : v);
   if (v instanceof Date) return iso(v.getTime());
   let s = String(v).trim();
@@ -90,7 +90,7 @@ function when(v) {
     return iso(Date.parse(s.replace(/(\.\d{3})\d+/, "$1")));
   s = s.toLowerCase().replace(/([ap])\.m\./g, "$1m");
   const now = Date.now();
-  const p = parts(now);
+  const p = parts(now, z);
   let y, mo, d;
   let m = /(\d{4})-(\d\d)-(\d\d)/.exec(s);
   if (m) [y, mo, d] = [+m[1], m[2] - 1, +m[3]];
@@ -104,14 +104,13 @@ function when(v) {
   if (t?.[4] === "pm" && h < 12) h += 12;
   if (t?.[4] === "am" && h === 12) h = 0;
   const [mi, se] = t ? [+t[2], +(t[3] ?? 0)] : [0, 0];
-  let r = local(y ?? p.year, mo ?? p.month - 1, d ?? p.day, h, mi, se);
+  let r = local(z, y ?? p.year, mo ?? p.month - 1, d ?? p.day, h, mi, se);
   if (d == null && r > now + 3600e3) r -= 864e5;
   if (y == null && d != null && r > now + 864e5)
-    r = local(p.year - 1, mo, d, h, mi, se);
+    r = local(z, p.year - 1, mo, d, h, mi, se);
   return iso(r);
 }
 
-// minutes from "2 Hour(s) and 28 Minute(s)", "5.5 Hours", "4h 0m", "5:10", "29 min", ...
 function dur(v) {
   if (typeof v === "number") return Math.round(v);
   const s = String(v).toLowerCase().split(/\bto\b/)[0];
@@ -123,8 +122,7 @@ function dur(v) {
   return Math.round((h ? +h[1] * 60 : 0) + (m ? +m[1] : 0));
 }
 
-// raw fields -> normalized record; unknown keys go to x
-function norm(id, o) {
+function norm(z, id, o) {
   const r = { id };
   const x = { ...o.x };
   for (const [k, v] of Object.entries(o)) {
@@ -136,8 +134,15 @@ function norm(id, o) {
     } else if (k === "q" || k === "tr" || k === "n") {
       const n = Math.round(num(typeof v === "string" ? v.replace(/,/g, "") : v));
       if (Number.isFinite(n)) r[k] = n;
-    } else if (k === "a") r.a = when(v);
-    else if (k === "s") r.s = v;
+    } else if (k === "a") r.a = when(v, z);
+    else if (k === "s")
+      r.s = /clos|ferm/i.test(v)
+        ? "closed"
+        : /down|unavail/i.test(v)
+          ? "down"
+          : /open|ouvert/i.test(v)
+            ? "open"
+            : String(v).toLowerCase();
     else x[k] = v;
   }
   for (const k of Object.keys(x)) if (x[k] == null || x[k] === "") delete x[k];
@@ -148,7 +153,6 @@ function norm(id, o) {
 }
 const hrs = (v) => (v == null ? undefined : +v * 60);
 
-// Power BI public report ("publish to web")
 const PBI = "https://wabi-canada-central-api.analysis.windows.net";
 const swap = (o, m) => {
   if (Array.isArray(o)) return o.map((x) => swap(x, m));
@@ -211,18 +215,16 @@ function pbv(t) {
   if (s?.DN && typeof v === "number") v = ds.ValueDicts[s.DN][v];
   return v;
 }
-// Power BI datetimes are wall-clock values tagged as UTC
 const pbt = (v) =>
   typeof v === "number" ? new Date(v).toISOString().slice(0, 19) : v;
 
 const P = {
-  // Oculys prEDict: v = {id: siteId}
   o: async (s) => {
     const j = await json(s.u);
     return Object.entries(s.v).map(([id, k]) => {
       const x = j.sites.find((y) => y.siteId === k);
       if (!x) throw new Error("parse");
-      return norm(id, {
+      return norm(s.z, id, {
         w: hrs(x.estimatedWaitTime),
         l: hrs(x.longestCurrentWaitTime),
         q: x.patientsWaiting,
@@ -237,7 +239,6 @@ const P = {
       });
     });
   },
-  // Hamilton / St. Joe's: v = {id: "ORG/site"}
   m: (s) =>
     Promise.all(
       Object.entries(s.v).map(async ([id, k]) => {
@@ -246,7 +247,7 @@ const P = {
           `${s.u}/GetWaitTime?organization=${o}&site=${t}&languageCode=en`,
         );
         const c = j.currentSixHourAverageWaitTime;
-        return norm(id, {
+        return norm(s.z, id, {
           w: c?.averageMinutes,
           a: c?.asOf,
           s: j.currentlyOpen === false ? "closed" : undefined,
@@ -258,12 +259,11 @@ const P = {
         });
       }),
     ),
-  // THP: v = {id: siteCode}
   p: (s) =>
     Promise.all(
       Object.entries(s.v).map(async ([id, k]) => {
         const j = await json(`${s.u}/${k}`);
-        return norm(id, {
+        return norm(s.z, id, {
           w: hrs(j.averageTimeToSeeDoctor),
           q: j.patientsWaitingToSeeDoctor,
           n: j.activePatients,
@@ -278,7 +278,6 @@ const P = {
         });
       }),
     ),
-  // TransForm SSO: metrics.json (some sites) + Cerner XML (all sites); v = {id: code}
   f: async (s) => {
     const [mj, xr] = await Promise.all([json(`${s.u}/metrics.json`), get(`${s.u}/all_fnedwaittimes_fnlog.xml`)]);
     const lm = xr.h.get("last-modified");
@@ -295,7 +294,7 @@ const P = {
       const ed = xv(r, "EDVOL", "PATCNT") ?? 0;
       const wr = xv(r, "WAITROOM", "WAITROOMCNT") ?? 0;
       const q = m ? m.waiting_count : wr;
-      return norm(id, {
+      return norm(s.z, id, {
         w: m ? m.mean : xv(r, "WAITROOM", "MEANWAIT"),
         l: m ? m.longest : xv(r, "WAITROOM", "LONGESTWAIT"),
         q,
@@ -311,7 +310,6 @@ const P = {
       });
     });
   },
-  // HTML page, regexes with named groups on plain text; r = shared regexes, v = {id: regex | [regex]}
   e: async (s) => {
     const t = plain((await get(s.u)).t);
     const pick = (l) => {
@@ -324,32 +322,151 @@ const P = {
       return o;
     };
     const c = s.r ? pick(s.r) : {};
-    return Object.entries(s.v).map(([id, l]) => norm(id, { ...c, ...pick(l) }));
+    return Object.entries(s.v).map(([id, l]) => norm(s.z, id, { ...c, ...pick(l) }));
   },
-  // plain text "HH:MM" longest wait; v = {id: 1}
   s: async (s) => {
     const r = await get(s.u);
     const lm = r.h.get("last-modified");
     return Object.keys(s.v).map((id) =>
-      norm(id, { l: r.t.trim(), a: lm && new Date(lm) }),
+      norm(s.z, id, { l: r.t.trim(), a: lm && new Date(lm) }),
     );
   },
-  // Luma Health; v = {id: 1}
   u: async (s) => {
     const j = await json(`${s.u}?nocache=${Date.now()}`);
     return Object.keys(s.v).map((id) =>
-      norm(id, { w: j.averageWaitTime, l: j.longestWaitTime, a: j.calculatedAt }),
+      norm(s.z, id, { w: j.averageWaitTime, l: j.longestWaitTime, a: j.calculatedAt }),
     );
   },
-  // GHD seewait chart: latest point; v = {id: 1}
   g: async (s) => {
     const j = await json(s.u);
     const x = j.reduce((a, b) => (b.timeStamp > a.timeStamp ? b : a));
     return Object.keys(s.v).map((id) =>
-      norm(id, { w: x.aveWaitMin, l: x.longestWaitMin, a: x.timeStamp }),
+      norm(s.z, id, { w: x.aveWaitMin, l: x.longestWaitMin, a: x.timeStamp }),
     );
   },
-  // Power BI: k = resource key, v = {id: {field: visualName | [visualName, ...]}}
+  a: async (s) => {
+    const j = await json(s.u);
+    const m = new Map();
+    for (const c of Object.values(j))
+      for (const l of Object.values(c))
+        for (const x of [l].flat()) {
+          if (!x?.Name) continue;
+          const sp = (k) => String(x[k] ?? "").split("[;]");
+          sp("Name").forEach((n, i) =>
+            m.set(n.trim(), { w: sp("WaitTime")[i], u: sp("TimesUnavailable")[i] }),
+          );
+        }
+    return Object.entries(s.v).map(([id, k]) => {
+      const x = m.get(k);
+      if (!x) throw new Error("parse");
+      const na = /true/i.test(x.u) || !Number.isFinite(dur(x.w));
+      return norm(s.z, id, { w: na ? undefined : x.w, s: na ? "down" : undefined });
+    });
+  },
+  j: async (s) => {
+    const l = await json(s.u);
+    return Object.entries(s.v).map(([id, k]) => {
+      const x = l.find((y) => y.slug === k);
+      if (!x) throw new Error("parse");
+      const w = x.showWaitTimes ? x.waitTime : undefined;
+      return norm(s.z, id, {
+        w: w?.waitTimeMinutes,
+        a: w?.createdAt,
+        s: w?.waitTimeMinutes == null ? "down" : undefined,
+        x: {
+          elos: w?.elosMinutes,
+          st: w?.status && w.status !== "normal" ? w.status : undefined,
+        },
+      });
+    });
+  },
+  r: async (s) => {
+    const t = (await get(s.u)).t;
+    const m = new Map();
+    for (const c of t.split(new RegExp(s.d))) {
+      const k = new RegExp(s.k).exec(c)?.[1];
+      if (!k) continue;
+      const p = plain(c);
+      const o = {};
+      for (const re of [s.f].flat()) Object.assign(o, new RegExp(re).exec(p)?.groups);
+      m.set(k, o);
+    }
+    return Object.entries(s.v).map(([id, k]) => {
+      if (!m.has(k)) throw new Error("parse");
+      return norm(s.z, id, m.get(k));
+    });
+  },
+  n: async (s) => {
+    const [l, c] = await Promise.all([json(s.u), json(s.c)]);
+    const now = Date.now();
+    return Object.entries(s.v).map(([id, k]) => {
+      const x = l.find((y) => y.siteCode === k);
+      const p = x?.predictions?.find((y) => y.predictionHour === 1);
+      const cl = c.find(
+        (y) =>
+          y.siteCode === k &&
+          Date.parse(when(y.tempClosureStart, s.z)) <= now &&
+          now < Date.parse(when(y.tempClosureEnd, s.z)),
+      );
+      return norm(s.z, id, {
+        w: hrs(p?.predictedWaitTime),
+        a: p?.predictionTime,
+        s: cl ? "closed" : "open",
+        x: {
+          lo: hrs(p?.predictedWaitTimeLower),
+          hi: hrs(p?.predictedWaitTimeUpper),
+          cu: cl ? when(cl.tempClosureEnd, s.z) : undefined,
+        },
+      });
+    });
+  },
+  q: async (s) => {
+    const r = await fetch(s.u, { headers: H, signal: AbortSignal.timeout(60000) });
+    if (!r.ok) throw new Error(`http ${r.status}`);
+    const [h, ...rows] = new TextDecoder("latin1")
+      .decode(await r.arrayBuffer())
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((l) => l.split(",").map((c) => c.replace(/"/g, "").trim()));
+    const ix = (re) => h.findIndex((c) => re.test(c));
+    const c = {
+      p: ix(/^No_permis/),
+      cf: ix(/civieres_fonctionnelles/),
+      co: ix(/civieres_occupees/),
+      h24: ix(/plus_de_24/),
+      h48: ix(/plus_de_48/),
+      n: ix(/presents/),
+      q: ix(/attente_de_PEC/),
+      dc: ix(/^DMS_sur_civiere$/),
+      da: ix(/^DMS_ambulatoire$/),
+      a: ix(/Mise_a_jour/),
+    };
+    if (Object.values(c).some((i) => i < 0)) throw new Error("parse");
+    const m = new Map(rows.map((x) => [x[c.p], x]));
+    const v = (x, k) => {
+      const n = num(x[c[k]]);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    return Object.entries(s.v).map(([id, k]) => {
+      const x = m.get(k);
+      if (!x) throw new Error("parse");
+      const ok = v(x, "n") != null;
+      return norm(s.z, id, {
+        w: hrs(v(x, "da")),
+        n: v(x, "n"),
+        q: v(x, "q"),
+        a: x[c.a],
+        s: ok ? undefined : "down",
+        x: {
+          cf: v(x, "cf"),
+          co: v(x, "co"),
+          h24: v(x, "h24"),
+          h48: v(x, "h48"),
+          dc: dur(hrs(v(x, "dc"))),
+        },
+      });
+    });
+  },
   b: async (s) => {
     const c = s.c ?? PBI;
     const h = { "X-PowerBI-ResourceKey": s.k };
@@ -396,7 +513,6 @@ const P = {
         modelId: j.models[0].id,
       },
     });
-    // results arrive in completion order; jobIds are in request order
     const job = new Map((t.results ?? []).map((r) => [r.jobId, r]));
     const got = Object.fromEntries(want.map((n, i) => [n, pbv(job.get(t.jobIds?.[i]))]));
     return Object.entries(s.v).map(([id, f]) => {
@@ -408,7 +524,7 @@ const P = {
             ? l.map(pbt).map((x, i) => (i === 0 && l.length > 1 ? String(x).slice(0, 10) : x)).join(" ")
             : l[0];
       }
-      return norm(id, o);
+      return norm(s.z, id, o);
     });
   },
 };
@@ -426,7 +542,8 @@ function stable(v) {
 }
 const core = ({ x, ...r }) => stable(r);
 const ids = (s) => Object.keys(s.v);
-
+const why = (e) =>
+  `fail ${e?.name ?? ""} ${/^(http \d+|parse)$/.test(e?.message) ? e.message : ""}`.trim();
 const S = JSON.parse(process.env.S ?? "[]");
 const old = new Map();
 try {
@@ -444,9 +561,7 @@ R.forEach((r, i) => {
   } else {
     bad++;
     for (const id of ids(s)) if (old.has(id)) out.push(old.get(id));
-    console.log(
-      `${ids(s)[0]} fail ${r.reason?.name ?? ""} ${/^(http \d+|parse)$/.test(r.reason?.message) ? r.reason.message : ""}`.trim(),
-    );
+    console.log(`${ids(s)[0]} ${why(r.reason)}`);
   }
 });
 
