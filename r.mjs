@@ -542,9 +542,21 @@ function stable(v) {
 }
 const core = ({ x, ...r }) => stable(r);
 const ids = (s) => Object.keys(s.v);
-const why = (e) =>
-  `fail ${e?.name ?? ""} ${/^(http \d+|parse)$/.test(e?.message) ? e.message : ""}`.trim();
-const S = JSON.parse(process.env.S ?? "[]");
+const why = (e) => {
+  const m = String(e?.message ?? "");
+  const c = e?.cause?.code ?? e?.cause?.name ?? "";
+  return `fail ${e?.name ?? ""} ${/https?:|\/\/|\.[a-z]{2,}\//i.test(m) ? "" : m.slice(0, 80)} ${c}`
+    .replace(/\s+/g, " ")
+    .trim();
+};
+let S;
+try {
+  S = JSON.parse(process.env.S);
+  if (!Array.isArray(S) || !S.length) throw 0;
+} catch {
+  console.log("S missing or invalid");
+  process.exit(1);
+}
 const old = new Map();
 try {
   for (const r of JSON.parse(await readFile(L, "utf8"))) old.set(r.id, r);
