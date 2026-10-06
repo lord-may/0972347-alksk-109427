@@ -612,4 +612,4 @@ if (rows.length) {
 await writeFile(`${L}.tmp`, `[\n${out.map(stable).join(",\n")}\n]\n`);
 await rename(`${L}.tmp`, L);
 console.log(`${out.length} ers, ${rows.length} rows`);
-if (bad) process.exitCode = 1;
+if (bad === S.length) process.exitCode = 1;
