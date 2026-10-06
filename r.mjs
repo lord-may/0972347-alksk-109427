@@ -420,6 +420,33 @@ const P = {
       });
     });
   },
+  d: async (s) => {
+    const t = (await get(s.u)).t;
+    const m = new Map();
+    for (const [, g] of t.matchAll(/<tr class="diversion-table-item\b([^>]*)>/g)) {
+      const at = Object.fromEntries([...g.matchAll(/data-([\w-]+)="([^"]*)"/g)].map(([, k, v]) => [k, ent(v)]));
+      m.set(at.fid, at);
+    }
+    const now = Date.now();
+    return Object.entries(s.v).map(([id, k]) => {
+      const x = m.get(String(k));
+      if (!x) throw new Error("parse");
+      const st = JSON.parse(x.st || "[]");
+      const et = JSON.parse(x.et || "[]");
+      const i = st.findIndex((v, j) => Date.parse(v) <= now && now <= Date.parse(et[j]));
+      const fs = Date.parse(x["facility-start-time"]);
+      const fe = Date.parse(x["facility-end-time"]);
+      const ro = Date.parse(x["reopen-time-utc"]);
+      const ah = i < 0 && (now < fs || (now >= fe && now <= ro));
+      return norm(s.z, id, {
+        s: i >= 0 || ah ? "closed" : x["open-status"],
+        x: {
+          cu: i >= 0 ? when(et[i]) : ah ? when(now < fs ? fs : ro) : undefined,
+          ah: ah ? 1 : undefined,
+        },
+      });
+    });
+  },
   q: async (s) => {
     const load = async (u) => {
       if (/datastore_search/.test(u)) {
