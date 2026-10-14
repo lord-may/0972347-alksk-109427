@@ -217,6 +217,31 @@ function pbv(t) {
 }
 const pbt = (v) =>
   typeof v === "number" ? new Date(v).toISOString().slice(0, 19) : v;
+// PBIR visuals reference tables as SourceRef.Entity; rewrite to From aliases
+const alias = (o, from) => {
+  if (Array.isArray(o)) return o.map((x) => alias(x, from));
+  if (!o || typeof o !== "object") return o;
+  const r = {};
+  for (const [a, b] of Object.entries(o)) {
+    if (a === "SourceRef" && b?.Entity) {
+      let x = from.find((y) => y.Entity === b.Entity && y.Schema === b.Schema);
+      if (!x) {
+        x = { Name: `t${from.length}`, Entity: b.Entity, Type: 0 };
+        if (b.Schema) x.Schema = b.Schema;
+        from.push(x);
+      }
+      r[a] = { Source: x.Name };
+    } else r[a] = alias(b, from);
+  }
+  return r;
+};
+function pbir(v) {
+  const ps = Object.values(v?.query?.queryState ?? {}).flatMap((r) => r.projections ?? []);
+  if (ps.length !== 1) return find(v?.objects?.values, "Subquery")?.Query;
+  const from = [];
+  const sel = { ...alias(ps[0].field, from), Name: ps[0].queryRef };
+  return { Version: 2, From: from, Select: [sel] };
+}
 
 const P = {
   o: async (s) => {
@@ -518,19 +543,33 @@ const P = {
       `${c}/public/reports/${s.k}/modelsAndExploration?preferReadOnlySession=true`,
       { h },
     );
-    const rf = JSON.parse(j.exploration.filters ?? "[]");
     const vis = {};
-    for (const sec of j.exploration.sections) {
-      const sf = JSON.parse(sec.filters ?? "[]");
-      for (const v of sec.visualContainers) {
-        const g = JSON.parse(v.config);
-        const sv = g.singleVisual;
-        const q =
-          sv?.prototypeQuery?.Select?.length === 1
-            ? sv.prototypeQuery
-            : find(sv?.objects?.values, "Subquery")?.Query;
-        if (q && !vis[g.name])
-          vis[g.name] = pbq(q, [...rf, ...sf, ...JSON.parse(v.filters ?? "[]")]);
+    const add = (n, q, fl) => {
+      if (q && !vis[n]) vis[n] = pbq(q, fl);
+    };
+    const doc = j.exploration.explorationContent?.explorationDocument;
+    if (doc) {
+      const d = JSON.parse(doc);
+      const ff = (o) => o?.filterConfig?.filters ?? [];
+      const rf = ff(d.report?.content);
+      for (const p of d.pages?.pages ?? []) {
+        const pf = ff(p.content);
+        for (const { content: v } of p.visualContainers ?? [])
+          add(v.name, pbir(v.visual), [...rf, ...pf, ...ff(v)]);
+      }
+    } else {
+      const rf = JSON.parse(j.exploration.filters ?? "[]");
+      for (const sec of j.exploration.sections) {
+        const sf = JSON.parse(sec.filters ?? "[]");
+        for (const v of sec.visualContainers) {
+          const g = JSON.parse(v.config);
+          const sv = g.singleVisual;
+          const q =
+            sv?.prototypeQuery?.Select?.length === 1
+              ? sv.prototypeQuery
+              : find(sv?.objects?.values, "Subquery")?.Query;
+          add(g.name, q, [...rf, ...sf, ...JSON.parse(v.filters ?? "[]")]);
+        }
       }
     }
     const want = [...new Set(Object.values(s.v).flatMap((f) => Object.values(f).flat()))];
